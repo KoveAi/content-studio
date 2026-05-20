@@ -198,37 +198,36 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             r.stderr.decode('utf-8', errors='replace')[-600:]
         )
 
-    # One image per slide held for its full duration
-    video_concat_txt = os.path.join(work_dir, 'video_concat.txt')
-    with open(video_concat_txt, 'w', encoding='utf-8') as f:
-        for s in range(1, num_slides + 1):
-            img = slide_img.get(s) or slide_img[max(slide_img)]
-            audio_dur = sum(
-                get_wav_duration_ms(w) for w in audio_map.get(s, [])
-            ) / 1000.0
-            duration = audio_dur + buffer_seconds
-            f.write("file '{}'\n".format(img.replace(os.sep, '/')))
-            f.write('duration {:.3f}\n'.format(duration))
+    # Build FFmpeg command: each slide as a timed loop input, concat filter, mux with audio
+    encode_cmd = [ffmpeg, '-y']
+    for s in range(1, num_slides + 1):
+        img = slide_img.get(s) or slide_img[max(slide_img)]
+        audio_dur = sum(
+            get_wav_duration_ms(w) for w in audio_map.get(s, [])
+        ) / 1000.0
+        duration = audio_dur + buffer_seconds
+        encode_cmd += ['-loop', '1', '-t', f'{duration:.3f}', '-i', img]
 
-    # Encode: H.264, AAC, 30fps, 8000k bitrate, slow preset, 48kHz
-    r = subprocess.run(
-        [
-            ffmpeg, '-y',
-            '-f', 'concat', '-safe', '0', '-i', video_concat_txt,
-            '-i', merged_wav,
-            '-map', '0:v',
-            '-map', '1:a',
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-b:v', '8000k',
-            '-r', '30',
-            '-c:a', 'aac',
-            '-ar', '48000',
-            '-pix_fmt', 'yuv420p',
-            output_path,
-        ],
-        capture_output=True
-    )
+    encode_cmd += ['-i', merged_wav]
+
+    filter_parts = ''.join(f'[{i}:v]' for i in range(num_slides))
+    filter_complex = f'{filter_parts}concat=n={num_slides}:v=1:a=0[v]'
+
+    encode_cmd += [
+        '-filter_complex', filter_complex,
+        '-map', '[v]',
+        '-map', f'{num_slides}:a',
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-b:v', '8000k',
+        '-r', '30',
+        '-c:a', 'aac',
+        '-ar', '48000',
+        '-pix_fmt', 'yuv420p',
+        output_path,
+    ]
+
+    r = subprocess.run(encode_cmd, capture_output=True)
     if r.returncode != 0:
         raise RuntimeError(
             'FFmpeg encode failed: ' +
