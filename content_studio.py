@@ -15,6 +15,7 @@ Usage:
 
 import os
 import sys
+import gc
 import json
 import wave
 import shutil
@@ -119,10 +120,13 @@ def _extract_slide_images(pptx_path, slides_dir):
                 [soffice,
                  f'-env:UserInstallation={user_install}',
                  '--headless', '--norestore', '--nofirststartwizard',
+                 '--nojava',
                  '--convert-to', 'png',
                  '--outdir', slides_dir, pptx_path],
-                capture_output=True, timeout=300, check=False
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=300, check=False
             )
+            gc.collect()
             pngs = sorted(
                 (os.path.join(slides_dir, f)
                  for f in os.listdir(slides_dir)
@@ -190,7 +194,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
     r = subprocess.run(
         [ffmpeg, '-y', '-f', 'concat', '-safe', '0', '-i', audio_concat_txt,
          '-ar', '48000', '-ac', '1', '-sample_fmt', 's16', merged_wav],
-        capture_output=True
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
     if r.returncode != 0:
         raise RuntimeError(
