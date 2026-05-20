@@ -219,7 +219,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
         '-map', f'{num_slides}:a',
         '-c:v', 'libx264',
         '-preset', 'veryfast',
-        '-b:v', '8000k',
+        '-b:v', '1500k',
         '-r', '30',
         '-c:a', 'aac',
         '-ar', '48000',
@@ -227,7 +227,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
         output_path,
     ]
 
-    r = subprocess.run(encode_cmd, capture_output=True)
+    r = subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if r.returncode != 0:
         raise RuntimeError(
             'FFmpeg encode failed: ' +
@@ -1485,15 +1485,14 @@ class StudioHandler(SimpleHTTPRequestHandler):
             )
             
             # Send file back
-            with open(output_path, 'rb') as f:
-                data = f.read()
-            
+            file_size = os.path.getsize(output_path)
             self.send_response(200)
             self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
             self.send_header('Content-Disposition', 'attachment; filename="presentation_with_audio.pptx"')
-            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Content-Length', str(file_size))
             self.end_headers()
-            self.wfile.write(data)
+            with open(output_path, 'rb') as f:
+                shutil.copyfileobj(f, self.wfile, 65536)
         
         except Exception as e:
             self._json_response({'error': str(e)}, status=500)
@@ -1518,15 +1517,14 @@ class StudioHandler(SimpleHTTPRequestHandler):
                 norm_target=norm_target,
             )
 
-            with open(output_path, 'rb') as f:
-                data = f.read()
-
+            file_size = os.path.getsize(output_path)
             self.send_response(200)
             self.send_header('Content-Type', 'video/mp4')
             self.send_header('Content-Disposition', 'attachment; filename="presentation_export.mp4"')
-            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Content-Length', str(file_size))
             self.end_headers()
-            self.wfile.write(data)
+            with open(output_path, 'rb') as f:
+                shutil.copyfileobj(f, self.wfile, 65536)
 
         except Exception as e:
             self._json_response({'error': str(e)}, status=500)
