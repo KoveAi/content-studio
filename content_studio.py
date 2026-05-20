@@ -112,15 +112,23 @@ def _extract_slide_images(pptx_path, slides_dir):
     soffice = _find_soffice()
     if soffice:
         try:
+            lo_profile = os.path.join(slides_dir, 'lo_profile')
+            os.makedirs(lo_profile, exist_ok=True)
+            user_install = 'file://' + lo_profile.replace('\\', '/')
             subprocess.run(
-                [soffice, '--headless', '--convert-to', 'png',
+                [soffice,
+                 f'-env:UserInstallation={user_install}',
+                 '--headless', '--norestore', '--nofirststartwizard',
+                 '--convert-to', 'png',
                  '--outdir', slides_dir, pptx_path],
-                capture_output=True, timeout=180, check=False
+                capture_output=True, timeout=300, check=False
             )
             pngs = sorted(
-                os.path.join(slides_dir, f)
-                for f in os.listdir(slides_dir)
-                if f.lower().endswith('.png')
+                (os.path.join(slides_dir, f)
+                 for f in os.listdir(slides_dir)
+                 if f.lower().endswith('.png')),
+                key=lambda p: [int(c) if c.isdigit() else c.lower()
+                               for c in re.split(r'(\d+)', os.path.basename(p))]
             )
             if pngs:
                 return pngs
