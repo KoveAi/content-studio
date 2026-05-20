@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+*.zip
+*.bat
+*.docx
+*.pptx
+*.wav
+*.mp4
