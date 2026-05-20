@@ -16,6 +16,7 @@ Usage:
 import os
 import sys
 import gc
+import mmap
 import json
 import wave
 import shutil
@@ -1309,108 +1310,136 @@ class StudioHandler(SimpleHTTPRequestHandler):
             self.send_error(404)
     
     def _parse_multipart(self):
-        """Parse multipart form data with binary-safe handling (no cgi module)."""
+        """Parse multipart form data, streaming body to disk to avoid large heap allocations."""
         content_type = self.headers['Content-Type']
         content_length = int(self.headers['Content-Length'])
-        
+
+        boundary = None
+        for tok in content_type.split(';'):
+            tok = tok.strip()
+            if tok.startswith('boundary='):
+                boundary = tok[9:].strip().strip('"')
+                break
+        if not boundary:
+            raise ValueError("No boundary found in Content-Type")
+
         # Clear previous uploads
-        for f in os.listdir(UPLOAD_DIR):
-            fp = os.path.join(UPLOAD_DIR, f)
+        for name in list(os.listdir(UPLOAD_DIR)):
+            fp = os.path.join(UPLOAD_DIR, name)
             if os.path.isfile(fp):
                 os.remove(fp)
             elif os.path.isdir(fp):
                 shutil.rmtree(fp)
-        
-        # Read the entire body as binary
-        body = self.rfile.read(content_length)
-        
-        # Extract boundary from Content-Type
-        boundary = None
-        for part in content_type.split(';'):
-            part = part.strip()
-            if part.startswith('boundary='):
-                boundary = part[len('boundary='):].strip().strip('"')
-                break
-        
-        if not boundary:
-            raise ValueError("No boundary found in Content-Type")
-        
-        boundary_bytes = ('--' + boundary).encode('utf-8')
-        end_boundary = (boundary_bytes + b'--')
-        
-        # Split body by boundary
-        parts = body.split(boundary_bytes)
-        
-        pptx_path = None
+
         audio_dir = os.path.join(UPLOAD_DIR, 'audio')
         os.makedirs(audio_dir, exist_ok=True)
-        buffer = 1.5
+
+        # Write the entire request body to disk in 64 KB chunks.
+        # This keeps the Python heap near-empty during the upload phase
+        # instead of allocating content_length bytes twice (body + split copy).
+        body_path = os.path.join(UPLOAD_DIR, '_body.tmp')
+        with open(body_path, 'wb') as bf:
+            remaining = content_length
+            while remaining > 0:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                bf.write(chunk)
+                remaining -= len(chunk)
+
+        boundary_bytes = ('--' + boundary).encode()
+        pptx_path = None
+        buffer_val = 1.5
         norm_mode = 'off'
         norm_target = -1.0
-        
-        for part in parts:
-            # Skip empty parts and the final boundary marker
-            if not part or part.strip() == b'' or part.strip() == b'--':
-                continue
-            if part.startswith(b'--'):
-                continue
-            
-            # Remove leading \r\n
-            if part.startswith(b'\r\n'):
-                part = part[2:]
-            # Remove trailing \r\n
-            if part.endswith(b'\r\n'):
-                part = part[:-2]
-            
-            # Split headers from body at \r\n\r\n
-            header_end = part.find(b'\r\n\r\n')
-            if header_end == -1:
-                continue
-            
-            header_block = part[:header_end].decode('utf-8', errors='replace')
-            file_data = part[header_end + 4:]
-            
-            # Parse the Content-Disposition header
-            name = None
-            filename = None
-            for line in header_block.split('\r\n'):
-                if 'Content-Disposition' in line:
-                    for token in line.split(';'):
-                        token = token.strip()
-                        if token.startswith('name='):
-                            name = token[len('name='):].strip('"')
-                        elif token.startswith('filename='):
-                            filename = token[len('filename='):].strip('"')
-            
-            if not name:
-                continue
-            
-            if name == 'pptx' and filename:
-                # Sanitize filename
-                safe_name = re.sub(r'[^\w\s\-\.]', '_', filename)
-                pptx_path = os.path.join(UPLOAD_DIR, safe_name)
-                with open(pptx_path, 'wb') as f:
-                    f.write(file_data)
-            elif name == 'audio' and filename:
-                safe_name = re.sub(r'[^\w\s\-\.]', '_', filename)
-                audio_path = os.path.join(audio_dir, safe_name)
-                with open(audio_path, 'wb') as f:
-                    f.write(file_data)
-            elif name == 'buffer':
-                try:
-                    buffer = float(file_data.decode('utf-8').strip())
-                except:
-                    buffer = 1.5
-            elif name == 'norm_mode':
-                val = file_data.decode('utf-8').strip()
-                norm_mode = val if val in ('off', 'peak', 'rms') else 'off'
-            elif name == 'norm_target':
-                try:
-                    norm_target = float(file_data.decode('utf-8').strip())
-                except:
-                    norm_target = -1.0
-        
-        return pptx_path, audio_dir, buffer, norm_mode, norm_target
+
+        try:
+            with open(body_path, 'rb') as bf:
+                with mmap.mmap(bf.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    size = mm.size()
+
+                    # Locate every boundary in one pass
+                    positions = []
+                    pos = 0
+                    while True:
+                        idx = mm.find(boundary_bytes, pos)
+                        if idx == -1:
+                            break
+                        positions.append(idx)
+                        pos = idx + len(boundary_bytes)
+
+                    for i, bstart in enumerate(positions):
+                        after = bstart + len(boundary_bytes)
+                        if after >= size:
+                            break
+                        if mm[after:after + 2] == b'--':  # end boundary
+                            break
+                        content_start = after + (2 if mm[after:after + 2] == b'\r\n' else 0)
+
+                        if i + 1 < len(positions):
+                            content_end = positions[i + 1]
+                            if mm[content_end - 2:content_end] == b'\r\n':
+                                content_end -= 2
+                        else:
+                            content_end = size
+
+                        hdr_end = mm.find(b'\r\n\r\n', content_start, content_end)
+                        if hdr_end == -1:
+                            continue
+
+                        header_block = mm[content_start:hdr_end].decode('utf-8', errors='replace')
+                        body_start = hdr_end + 4
+
+                        field_name = field_file = None
+                        for line in header_block.split('\r\n'):
+                            if 'Content-Disposition' in line:
+                                for part in line.split(';'):
+                                    part = part.strip()
+                                    if part.startswith('name='):
+                                        field_name = part[5:].strip('"')
+                                    elif part.startswith('filename='):
+                                        field_file = part[9:].strip('"')
+
+                        if not field_name:
+                            continue
+
+                        if field_name == 'pptx' and field_file:
+                            safe = re.sub(r'[^\w\s\-\.]', '_', field_file)
+                            pptx_path = os.path.join(UPLOAD_DIR, safe)
+                            with open(pptx_path, 'wb') as out:
+                                p = body_start
+                                while p < content_end:
+                                    end = min(p + 65536, content_end)
+                                    out.write(mm[p:end])
+                                    p = end
+                        elif field_name == 'audio' and field_file:
+                            safe = re.sub(r'[^\w\s\-\.]', '_', field_file)
+                            with open(os.path.join(audio_dir, safe), 'wb') as out:
+                                p = body_start
+                                while p < content_end:
+                                    end = min(p + 65536, content_end)
+                                    out.write(mm[p:end])
+                                    p = end
+                        elif field_name == 'buffer':
+                            try:
+                                buffer_val = float(mm[body_start:content_end].decode('utf-8', 'replace').strip())
+                            except ValueError:
+                                pass
+                        elif field_name == 'norm_mode':
+                            val = mm[body_start:content_end].decode('utf-8', 'replace').strip()
+                            norm_mode = val if val in ('off', 'peak', 'rms') else 'off'
+                        elif field_name == 'norm_target':
+                            try:
+                                norm_target = float(mm[body_start:content_end].decode('utf-8', 'replace').strip())
+                            except ValueError:
+                                pass
+        finally:
+            try:
+                os.remove(body_path)
+            except OSError:
+                pass
+
+        return pptx_path, audio_dir, buffer_val, norm_mode, norm_target
     
     def _handle_scan(self):
         """Scan files and return preview data with audio levels."""
