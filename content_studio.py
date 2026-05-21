@@ -70,6 +70,21 @@ def _find_soffice():
     return next((c for c in candidates if c and os.path.isfile(c)), None)
 
 
+def _unhide_slides_copy(src_pptx, dst_pptx):
+    """Write a copy of src_pptx with all slides forced visible.
+    LibreOffice skips hidden slides (show="0") during PDF export, which shifts
+    every slide after the hidden ones to the wrong position in the output video."""
+    with zipfile.ZipFile(src_pptx, 'r') as zin:
+        with zipfile.ZipFile(dst_pptx, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.namelist():
+                data = zin.read(item)
+                if re.match(r'ppt/slides/slide\d+\.xml$', item):
+                    content = data.decode('utf-8', errors='replace')
+                    content = re.sub(r'(<p:sld\b[^>]*)\s+show="0"', r'\1', content)
+                    data = content.encode('utf-8')
+                zout.writestr(item, data)
+
+
 def _extract_slide_images(pptx_path, slides_dir):
     """Export each slide to PNG.
     On Windows tries PowerPoint COM first. On Linux/Mac uses LibreOffice to
@@ -125,20 +140,28 @@ def _extract_slide_images(pptx_path, slides_dir):
     os.makedirs(lo_profile, exist_ok=True)
     user_install = 'file://' + lo_profile.replace('\\', '/')
 
-    # Step 1: PPTX → PDF. LibreOffice reliably exports every slide as a PDF page.
-    print('[slides] LibreOffice: converting PPTX to PDF', flush=True)
+    # Step 1: PPTX → PDF. Use an unhidden copy so LibreOffice doesn't skip
+    # hidden slides — if any slide has show="0" it gets omitted from the PDF,
+    # shifting every subsequent slide image to the wrong position in the video.
+    unhidden_pptx = os.path.join(slides_dir, '_unhidden.pptx')
+    _unhide_slides_copy(pptx_path, unhidden_pptx)
+    print('[slides] LibreOffice: converting PPTX to PDF (all slides visible)', flush=True)
     lo = subprocess.run(
         [soffice,
          f'-env:UserInstallation={user_install}',
          '--headless', '--norestore', '--nofirststartwizard',
          '--convert-to', 'pdf',
-         '--outdir', slides_dir, pptx_path],
+         '--outdir', slides_dir, unhidden_pptx],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         timeout=300, check=False
     )
+    try:
+        os.remove(unhidden_pptx)
+    except OSError:
+        pass
     gc.collect()
 
-    pdf_name = os.path.splitext(os.path.basename(pptx_path))[0] + '.pdf'
+    pdf_name = '_unhidden.pdf'
     pdf_path = os.path.join(slides_dir, pdf_name)
     if not os.path.isfile(pdf_path):
         lo_err = lo.stderr.decode('utf-8', errors='replace')[-1000:]
