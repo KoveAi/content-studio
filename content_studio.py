@@ -1298,14 +1298,21 @@ class StudioHandler(SimpleHTTPRequestHandler):
             self.send_error(404)
     
     def do_POST(self):
-        if self.path == '/api/scan':
-            self._handle_scan()
-        elif self.path == '/api/process':
-            self._handle_process()
-        elif self.path == '/api/export_mp4':
-            self._handle_export_mp4()
-        else:
-            self.send_error(404)
+        try:
+            if self.path == '/api/scan':
+                self._handle_scan()
+            elif self.path == '/api/process':
+                self._handle_process()
+            elif self.path == '/api/export_mp4':
+                self._handle_export_mp4()
+            else:
+                self.send_error(404)
+        except Exception:
+            traceback.print_exc()
+            try:
+                self._json_response({'error': 'Unexpected server error'}, status=500)
+            except Exception:
+                pass
     
     def _parse_multipart(self):
         """Parse multipart form data, streaming body to disk to avoid large heap allocations."""
@@ -1498,16 +1505,17 @@ class StudioHandler(SimpleHTTPRequestHandler):
     
     def _handle_process(self):
         """Process files and return the output PPTX."""
+        headers_sent = False
         try:
             pptx_path, audio_dir, buffer, norm_mode, norm_target = self._parse_multipart()
-            
+            print('[process] parsed upload', flush=True)
+
             if not pptx_path:
                 self._json_response({'error': 'No PowerPoint file uploaded'}, status=400)
                 return
-            
+
             output_path = os.path.join(UPLOAD_DIR, 'output_with_audio.pptx')
-            
-            results = embed_audio_into_pptx(
+            embed_audio_into_pptx(
                 pptx_path=pptx_path,
                 audio_dir=audio_dir,
                 output_path=output_path,
@@ -1515,9 +1523,10 @@ class StudioHandler(SimpleHTTPRequestHandler):
                 normalize_mode=norm_mode,
                 normalize_target_db=norm_target,
             )
-            
-            # Send file back
+            print('[process] embed done', flush=True)
+
             file_size = os.path.getsize(output_path)
+            headers_sent = True
             self.send_response(200)
             self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
             self.send_header('Content-Disposition', 'attachment; filename="presentation_with_audio.pptx"')
@@ -1525,15 +1534,19 @@ class StudioHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             with open(output_path, 'rb') as f:
                 shutil.copyfileobj(f, self.wfile, 65536)
-        
+
         except Exception as e:
             traceback.print_exc()
-            self._json_response({'error': str(e)}, status=500)
+            if not headers_sent:
+                self._json_response({'error': str(e)}, status=500)
     
     def _handle_export_mp4(self):
         """Render PPTX + audio to MP4 and stream the file back."""
+        headers_sent = False
         try:
+            print('[export_mp4] parsing upload', flush=True)
             pptx_path, audio_dir, buffer, norm_mode, norm_target = self._parse_multipart()
+            print(f'[export_mp4] pptx={pptx_path}', flush=True)
 
             if not pptx_path:
                 self._json_response({'error': 'No PowerPoint file uploaded'}, status=400)
@@ -1550,7 +1563,9 @@ class StudioHandler(SimpleHTTPRequestHandler):
                 norm_target=norm_target,
             )
 
+            print('[export_mp4] encode done, streaming', flush=True)
             file_size = os.path.getsize(output_path)
+            headers_sent = True
             self.send_response(200)
             self.send_header('Content-Type', 'video/mp4')
             self.send_header('Content-Disposition', 'attachment; filename="presentation_export.mp4"')
@@ -1558,10 +1573,12 @@ class StudioHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             with open(output_path, 'rb') as f:
                 shutil.copyfileobj(f, self.wfile, 65536)
+            print('[export_mp4] done', flush=True)
 
         except Exception as e:
             traceback.print_exc()
-            self._json_response({'error': str(e)}, status=500)
+            if not headers_sent:
+                self._json_response({'error': str(e)}, status=500)
 
 
     def _json_response(self, data, status=200):
