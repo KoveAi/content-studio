@@ -24,6 +24,7 @@ import zipfile
 import tempfile
 import re
 import threading
+import traceback
 import webbrowser
 from http.server import HTTPServer, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -112,37 +113,34 @@ def _extract_slide_images(pptx_path, slides_dir):
             pass
 
     soffice = _find_soffice()
-    if soffice:
-        try:
-            lo_profile = os.path.join(slides_dir, 'lo_profile')
-            os.makedirs(lo_profile, exist_ok=True)
-            user_install = 'file://' + lo_profile.replace('\\', '/')
-            subprocess.run(
-                [soffice,
-                 f'-env:UserInstallation={user_install}',
-                 '--headless', '--norestore', '--nofirststartwizard',
-                 '--nojava',
-                 '--convert-to', 'png',
-                 '--outdir', slides_dir, pptx_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=300, check=False
-            )
-            gc.collect()
-            pngs = sorted(
-                (os.path.join(slides_dir, f)
-                 for f in os.listdir(slides_dir)
-                 if f.lower().endswith('.png')),
-                key=lambda p: [int(c) if c.isdigit() else c.lower()
-                               for c in re.split(r'(\d+)', os.path.basename(p))]
-            )
-            if pngs:
-                return pngs
-        except Exception:
-            pass
+    if not soffice:
+        raise RuntimeError('LibreOffice not found. Cannot render slide images.')
 
+    lo_profile = os.path.join(slides_dir, 'lo_profile')
+    os.makedirs(lo_profile, exist_ok=True)
+    user_install = 'file://' + lo_profile.replace('\\', '/')
+    lo = subprocess.run(
+        [soffice,
+         f'-env:UserInstallation={user_install}',
+         '--headless', '--norestore', '--nofirststartwizard',
+         '--convert-to', 'png',
+         '--outdir', slides_dir, pptx_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        timeout=300, check=False
+    )
+    gc.collect()
+    pngs = sorted(
+        (os.path.join(slides_dir, f)
+         for f in os.listdir(slides_dir)
+         if f.lower().endswith('.png')),
+        key=lambda p: [int(c) if c.isdigit() else c.lower()
+                       for c in re.split(r'(\d+)', os.path.basename(p))]
+    )
+    if pngs:
+        return pngs
+    lo_err = lo.stderr.decode('utf-8', errors='replace')[-1000:]
     raise RuntimeError(
-        'Could not render slide images. Install Microsoft PowerPoint (Windows) '
-        'or LibreOffice and try again.'
+        f'LibreOffice exited {lo.returncode} and produced no PNGs.\n{lo_err}'
     )
 
 
@@ -1495,6 +1493,7 @@ class StudioHandler(SimpleHTTPRequestHandler):
                 'levels': levels,
             })
         except Exception as e:
+            traceback.print_exc()
             self._json_response({'error': str(e)})
     
     def _handle_process(self):
@@ -1528,6 +1527,7 @@ class StudioHandler(SimpleHTTPRequestHandler):
                 shutil.copyfileobj(f, self.wfile, 65536)
         
         except Exception as e:
+            traceback.print_exc()
             self._json_response({'error': str(e)}, status=500)
     
     def _handle_export_mp4(self):
@@ -1560,6 +1560,7 @@ class StudioHandler(SimpleHTTPRequestHandler):
                 shutil.copyfileobj(f, self.wfile, 65536)
 
         except Exception as e:
+            traceback.print_exc()
             self._json_response({'error': str(e)}, status=500)
 
 
