@@ -2,6 +2,6 @@ services:
   - type: web
     name: content-studio
     env: docker
-    plan: starter
+    plan: standard
     healthCheckPath: /
     dockerfilePath: ./Dockerfile

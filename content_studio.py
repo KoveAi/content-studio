@@ -157,8 +157,9 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
                 norm_mode='off', norm_target=-1.0):
     """
     Render PPTX + narration audio to MP4.
-    Video: H.264 (libx264), slow preset, 8000k bitrate, 30 fps.
-    Audio: AAC, 48000 Hz sample rate.
+    Encodes one slide at a time to keep peak memory low, then concats segments.
+    Video: H.264 (libx264), veryfast preset, 1500k, 1280x720, 30 fps.
+    Audio: AAC, 48000 Hz.
     """
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
@@ -176,6 +177,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
 
     slide_images = _extract_slide_images(pptx_path, slides_dir)
     slide_img = {i + 1: p for i, p in enumerate(slide_images)}
+    gc.collect()
 
     silence_path = os.path.join(work_dir, 'silence.wav')
     _create_silence_wav(silence_path, buffer_seconds)
@@ -201,39 +203,84 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             r.stderr.decode('utf-8', errors='replace')[-600:]
         )
 
-    # Build FFmpeg command: each slide as a timed loop input, concat filter, mux with audio
-    encode_cmd = [ffmpeg, '-y']
+    # Encode each slide to a short silent video segment — one FFmpeg call per slide
+    # so only one decoded image frame lives in memory at a time instead of all of them.
+    scale_filter = (
+        'scale=1280:720:force_original_aspect_ratio=decrease,'
+        'pad=1280:720:(ow-iw)/2:(oh-ih)/2'
+    )
+    segments = []
     for s in range(1, num_slides + 1):
         img = slide_img.get(s) or slide_img[max(slide_img)]
         audio_dur = sum(
             get_wav_duration_ms(w) for w in audio_map.get(s, [])
         ) / 1000.0
         duration = audio_dur + buffer_seconds
-        encode_cmd += ['-loop', '1', '-t', f'{duration:.3f}', '-i', img]
+        seg_path = os.path.join(work_dir, f'seg_{s:04d}.mp4')
+        r = subprocess.run(
+            [ffmpeg, '-y',
+             '-loop', '1', '-t', f'{duration:.3f}', '-i', img,
+             '-c:v', 'libx264', '-preset', 'veryfast',
+             '-b:v', '1500k', '-r', '30', '-pix_fmt', 'yuv420p',
+             '-vf', scale_filter,
+             '-an', seg_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+        if r.returncode != 0:
+            raise RuntimeError(
+                f'FFmpeg segment {s} failed: ' +
+                r.stderr.decode('utf-8', errors='replace')[-600:]
+            )
+        segments.append(seg_path)
 
-    encode_cmd += ['-i', merged_wav]
+    # Free PNG disk space now that all segments are encoded
+    for img_path in slide_images:
+        try:
+            os.remove(img_path)
+        except OSError:
+            pass
+    gc.collect()
 
-    filter_parts = ''.join(f'[{i}:v]' for i in range(num_slides))
-    filter_complex = f'{filter_parts}concat=n={num_slides}:v=1:a=0[v]'
+    # Concatenate video segments (stream-copy, no re-encode)
+    seg_list_path = os.path.join(work_dir, 'segments.txt')
+    with open(seg_list_path, 'w', encoding='utf-8') as f:
+        for seg in segments:
+            f.write("file '{}'\n".format(seg.replace(os.sep, '/')))
 
-    encode_cmd += [
-        '-filter_complex', filter_complex,
-        '-map', '[v]',
-        '-map', f'{num_slides}:a',
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-b:v', '1500k',
-        '-r', '30',
-        '-c:a', 'aac',
-        '-ar', '48000',
-        '-pix_fmt', 'yuv420p',
-        output_path,
-    ]
-
-    r = subprocess.run(encode_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    concat_video = os.path.join(work_dir, 'concat_video.mp4')
+    r = subprocess.run(
+        [ffmpeg, '-y', '-f', 'concat', '-safe', '0', '-i', seg_list_path,
+         '-c', 'copy', concat_video],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
     if r.returncode != 0:
         raise RuntimeError(
-            'FFmpeg encode failed: ' +
+            'FFmpeg concat failed: ' +
+            r.stderr.decode('utf-8', errors='replace')[-600:]
+        )
+
+    # Free segment files before final mux
+    for seg in segments:
+        try:
+            os.remove(seg)
+        except OSError:
+            pass
+    gc.collect()
+
+    # Mux video with merged audio
+    r = subprocess.run(
+        [ffmpeg, '-y',
+         '-i', concat_video,
+         '-i', merged_wav,
+         '-c:v', 'copy',
+         '-c:a', 'aac', '-ar', '48000',
+         '-shortest',
+         output_path],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            'FFmpeg mux failed: ' +
             r.stderr.decode('utf-8', errors='replace')[-600:]
         )
 
@@ -1574,6 +1621,16 @@ class StudioHandler(SimpleHTTPRequestHandler):
             with open(output_path, 'rb') as f:
                 shutil.copyfileobj(f, self.wfile, 65536)
             print('[export_mp4] done', flush=True)
+
+            # Free disk and memory immediately after streaming
+            work_dir = os.path.join(UPLOAD_DIR, 'mp4_work')
+            if os.path.isdir(work_dir):
+                shutil.rmtree(work_dir, ignore_errors=True)
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            gc.collect()
 
         except Exception as e:
             traceback.print_exc()
