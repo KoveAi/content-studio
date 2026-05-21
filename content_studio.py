@@ -241,7 +241,8 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             pass
     gc.collect()
 
-    # Concatenate video segments (stream-copy, no re-encode)
+    # Concatenate video segments with re-encode so timestamps are continuous.
+    # Stream-copy (-c copy) breaks slide timing on still-image H.264 segments.
     seg_list_path = os.path.join(work_dir, 'segments.txt')
     with open(seg_list_path, 'w', encoding='utf-8') as f:
         for seg in segments:
@@ -250,7 +251,9 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
     concat_video = os.path.join(work_dir, 'concat_video.mp4')
     r = subprocess.run(
         [ffmpeg, '-y', '-f', 'concat', '-safe', '0', '-i', seg_list_path,
-         '-c', 'copy', concat_video],
+         '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '1500k',
+         '-pix_fmt', 'yuv420p', '-r', '30',
+         concat_video],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
     if r.returncode != 0:
@@ -267,7 +270,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             pass
     gc.collect()
 
-    # Mux video with merged audio
+    # Mux concatenated video with merged audio
     r = subprocess.run(
         [ffmpeg, '-y',
          '-i', concat_video,
