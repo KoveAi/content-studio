@@ -1015,6 +1015,12 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 </footer>
 
 <script>
+  function fmtElapsed(ms) {
+    const s = ms / 1000;
+    if (s < 60) return s.toFixed(1) + 's';
+    return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
+  }
+
   // --- Client-side logic ---
 
   // Check FFmpeg availability on load
@@ -1168,15 +1174,13 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
     // Start elapsed timer
     const startTime = Date.now();
     let timerInterval = setInterval(() => {
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const currentLabel = progressStatus.getAttribute('data-label') || 'Processing';
-      progressStatus.textContent = `${currentLabel}  \u2014  ${elapsed}s elapsed`;
+      progressStatus.textContent = `${currentLabel}  \u2014  ${fmtElapsed(Date.now() - startTime)} elapsed`;
     }, 100);
 
     function setStatus(label) {
       progressStatus.setAttribute('data-label', label);
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      progressStatus.textContent = `${label}  \u2014  ${elapsed}s elapsed`;
+      progressStatus.textContent = `${label}  \u2014  ${fmtElapsed(Date.now() - startTime)} elapsed`;
     }
 
     setStatus('Uploading files...');
@@ -1279,15 +1283,13 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 
     const startTime = Date.now();
     let timerInterval = setInterval(() => {
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const label = progressStatus.getAttribute('data-label') || 'Processing';
-      progressStatus.textContent = `${label}  —  ${elapsed}s elapsed`;
+      progressStatus.textContent = `${label}  —  ${fmtElapsed(Date.now() - startTime)} elapsed`;
     }, 100);
 
     function setStatus(label) {
       progressStatus.setAttribute('data-label', label);
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      progressStatus.textContent = `${label}  —  ${elapsed}s elapsed`;
+      progressStatus.textContent = `${label}  —  ${fmtElapsed(Date.now() - startTime)} elapsed`;
     }
 
     setStatus('Uploading files…');
@@ -1322,7 +1324,7 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
         clearInterval(timerInterval);
         const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
         progressFill.style.width = '100%';
-        progressStatus.textContent = `Complete!  —  ${totalTime}s total`;
+        progressStatus.textContent = `Complete!  —  ${fmtElapsed(Date.now() - startTime)} total`;
 
         resultDiv.className = 'message success';
         resultDiv.innerHTML = `
