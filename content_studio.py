@@ -71,11 +71,16 @@ def _find_soffice():
 
 
 def _extract_slide_images(pptx_path, slides_dir):
-    """Export each slide to PNG via PowerPoint COM (Windows) or LibreOffice."""
+    """Export each slide to PNG.
+    On Windows tries PowerPoint COM first. On Linux/Mac uses LibreOffice to
+    export a PDF (all slides reliably), then pdftoppm to split into PNGs.
+    LibreOffice's --convert-to png only exports slide 1 on many versions.
+    """
     os.makedirs(slides_dir, exist_ok=True)
     for f in os.listdir(slides_dir):
-        if f.lower().endswith('.png'):
-            os.remove(os.path.join(slides_dir, f))
+        fp = os.path.join(slides_dir, f)
+        if os.path.isfile(fp):
+            os.remove(fp)
 
     if sys.platform == 'win32':
         try:
@@ -119,16 +124,43 @@ def _extract_slide_images(pptx_path, slides_dir):
     lo_profile = os.path.join(slides_dir, 'lo_profile')
     os.makedirs(lo_profile, exist_ok=True)
     user_install = 'file://' + lo_profile.replace('\\', '/')
+
+    # Step 1: PPTX → PDF. LibreOffice reliably exports every slide as a PDF page.
+    print('[slides] LibreOffice: converting PPTX to PDF', flush=True)
     lo = subprocess.run(
         [soffice,
          f'-env:UserInstallation={user_install}',
          '--headless', '--norestore', '--nofirststartwizard',
-         '--convert-to', 'png',
+         '--convert-to', 'pdf',
          '--outdir', slides_dir, pptx_path],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         timeout=300, check=False
     )
     gc.collect()
+
+    pdf_name = os.path.splitext(os.path.basename(pptx_path))[0] + '.pdf'
+    pdf_path = os.path.join(slides_dir, pdf_name)
+    if not os.path.isfile(pdf_path):
+        lo_err = lo.stderr.decode('utf-8', errors='replace')[-1000:]
+        raise RuntimeError(
+            f'LibreOffice PDF export failed (exit {lo.returncode}).\n{lo_err}'
+        )
+    print(f'[slides] PDF created: {pdf_path}', flush=True)
+
+    # Step 2: PDF → per-page PNGs with pdftoppm (one PNG per slide, correct count).
+    slide_prefix = os.path.join(slides_dir, 'slide')
+    r = subprocess.run(
+        ['pdftoppm', '-png', '-r', '150', pdf_path, slide_prefix],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        timeout=300, check=False
+    )
+    gc.collect()
+
+    try:
+        os.remove(pdf_path)
+    except OSError:
+        pass
+
     pngs = sorted(
         (os.path.join(slides_dir, f)
          for f in os.listdir(slides_dir)
@@ -137,10 +169,11 @@ def _extract_slide_images(pptx_path, slides_dir):
                        for c in re.split(r'(\d+)', os.path.basename(p))]
     )
     if pngs:
+        print(f'[slides] pdftoppm produced {len(pngs)} PNGs', flush=True)
         return pngs
-    lo_err = lo.stderr.decode('utf-8', errors='replace')[-1000:]
+    r_err = r.stderr.decode('utf-8', errors='replace')[-1000:]
     raise RuntimeError(
-        f'LibreOffice exited {lo.returncode} and produced no PNGs.\n{lo_err}'
+        f'pdftoppm produced no PNGs (exit {r.returncode}).\n{r_err}'
     )
 
 
@@ -247,7 +280,10 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             get_wav_duration_ms(w) for w in audio_map.get(s, [])
         ) / 1000.0
         duration = audio_dur + buffer_seconds
-        encode_cmd += ['-loop', '1', '-t', f'{duration:.3f}', '-i', img]
+        # -thread_queue_size 8 caps FFmpeg's per-input frame buffer so the
+        # concat filter doesn't pre-buffer hundreds of frames per slide.
+        encode_cmd += ['-thread_queue_size', '8',
+                       '-loop', '1', '-t', f'{duration:.3f}', '-i', img]
 
     encode_cmd += ['-i', merged_wav]
 
