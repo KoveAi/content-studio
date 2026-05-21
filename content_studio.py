@@ -172,11 +172,15 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
     slides_dir = os.path.join(work_dir, 'slides')
     os.makedirs(work_dir, exist_ok=True)
 
+    print(f'[export_mp4] counting slides in {pptx_path}', flush=True)
     num_slides = count_slides(pptx_path)
     audio_map = find_audio_files(audio_dir)
+    print(f'[export_mp4] {num_slides} slides, {len(audio_map)} audio clips found', flush=True)
 
+    print('[export_mp4] starting LibreOffice conversion', flush=True)
     slide_images = _extract_slide_images(pptx_path, slides_dir)
     slide_img = {i + 1: p for i, p in enumerate(slide_images)}
+    print(f'[export_mp4] LibreOffice produced {len(slide_images)} PNGs', flush=True)
     gc.collect()
 
     # Resize each PNG to 1280x720 before the main encode.
@@ -190,6 +194,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
     )
     resized = {}
     for idx, orig in slide_img.items():
+        print(f'[export_mp4] resizing slide {idx}/{len(slide_img)}', flush=True)
         out = os.path.join(resized_dir, f'slide_{idx:04d}.png')
         r = subprocess.run(
             [ffmpeg, '-y', '-i', orig, '-vf', scale_filter, out],
@@ -205,6 +210,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             os.remove(orig)
         except OSError:
             pass
+    print('[export_mp4] all slides resized, merging audio', flush=True)
     gc.collect()
 
     silence_path = os.path.join(work_dir, 'silence.wav')
@@ -230,6 +236,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             'FFmpeg audio merge failed: ' +
             r.stderr.decode('utf-8', errors='replace')[-600:]
         )
+    print('[export_mp4] audio merged, starting main encode', flush=True)
 
     # Single FFmpeg call: timed image loops → concat filter → encode with audio.
     # Each resized PNG (~3 MB) is looped for its slide's duration.
@@ -267,6 +274,7 @@ def _export_mp4(pptx_path, audio_dir, output_path, buffer_seconds=1.5,
             'FFmpeg encode failed: ' +
             r.stderr.decode('utf-8', errors='replace')[-600:]
         )
+    print('[export_mp4] encode complete', flush=True)
 
 
 # ---------------------------------------------------------------------------
